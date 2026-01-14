@@ -4,53 +4,59 @@ import numpy as np
 from my_model import EdgeDETR
 
 # --- CONFIG ---
-weights_path = "weights.pth"
+NUM_CLASSES = 5
+CONF_THRESH = 0.7
+FOCAL_LENGTH_PX = 800  # <--- YOU NEED THIS (Calibrate it!)
+REAL_WIDTH_CM = 5.0    # <--- YOU NEED THIS (Width of the object)
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# 1. Load Model
-model = EdgeDETR(num_classes=1).to(device)
-model.load_state_dict(torch.load(weights_path, map_location=device))
+# --- LOAD MODEL ---
+model = EdgeDETR(num_classes=NUM_CLASSES).to(device)
+model.load_state_dict(torch.load("edge_detr_weights.pth", map_location=device))
 model.eval()
 
-# 2. Camera Loop
-cap = cv2.VideoCapture(0)
-
-while True:
-    ret, frame = cap.read()
-    if not ret: break
+def detect_object(frame, target_class=0):
+    h, w, _ = frame.shape
     
     # Preprocess
     img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    tensor = torch.from_numpy(img).permute(2, 0, 1).float().unsqueeze(0).to(device) / 255.0
+    img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+    img = img.unsqueeze(0).to(device)
 
-    # Inference
     with torch.no_grad():
-        out = model(tensor)
+        out = model(img)
 
-    # Filter (Confidence > 70%)
-    probs = out['pred_logits'].softmax(-1)[0, :, :-1]
-    keep = probs.max(-1).values > 0.7
+    logits = out['pred_logits'][0]
+    boxes = out['pred_boxes'][0]
+
+    probs = logits.softmax(-1)
+    scores, labels = probs[:, :-1].max(-1)
+
+    mask = (labels == target_class) & (scores > CONF_THRESH)
+
+    if not mask.any():
+        return None
+
+    best = scores[mask].argmax()
+    idx = torch.where(mask)[0][best]
+
+    cx, cy, bw, bh = boxes[idx].cpu().numpy()
     
-    if keep.any():
-        # Get best box
-        idx = probs.max(-1).values.argmax()
-        box = out['pred_boxes'][0, idx].cpu().numpy()
-        h, w, _ = frame.shape
-        
-        # Convert 0-1 to Pixels
-        cx, cy, bw, bh = box * [w, h, w, h]
-        
-        # --- HERE IS YOUR COORDINATE HANDSHAKE ---
-        # print(f"Found Object at Pixels: {cx}, {cy}")
-        # Call your conversion function here:
-        # real_x, real_y = pixel_to_cm(cx, cy)
-        # move_robot(real_x, real_y)
-        
-        # Visual
-        cv2.rectangle(frame, (int(cx-bw/2), int(cy-bh/2)), (int(cx+bw/2), int(cy+bh/2)), (0,255,0), 2)
+    # Convert relative (0-1) to Pixels
+    cx_px, cy_px = cx * w, cy * h
+    width_px = bw * w  # Width in pixels
+    
+    # --- ADD THIS MATH TO GET DISTANCE ---
+    # Z = (Real Width * Focal Length) / Pixel Width
+    distance_cm = (REAL_WIDTH_CM * FOCAL_LENGTH_PX) / width_px
 
-    cv2.imshow("Jetson View", frame)
-    if cv2.waitKey(1) == ord('q'): break
-
-cap.release()
-cv2.destroyAllWindows()
+    return {
+        "cx": cx_px,
+        "cy": cy_px,
+        "w": width_px,
+        "h": bh * h,
+        "confidence": scores[idx].item(),
+        "class": target_class,
+        "distance_z": distance_cm  # <--- NOW IT FINDS DISTANCE
+    }
