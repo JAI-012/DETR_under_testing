@@ -22,7 +22,7 @@ def train():
     # EdgeDETR logic: linear_class output dim is num_classes + 1
     model = EdgeDETR(num_classes=NUM_CLASSES).to(device)
     
-        # Sanity Check
+    # Sanity Check
     with torch.no_grad():  # <--- Added wrapper
         dummy_in = torch.randn(1, 3, 480, 640).to(device)
         dummy_out = model(dummy_in)
